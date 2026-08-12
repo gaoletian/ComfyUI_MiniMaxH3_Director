@@ -139,6 +139,18 @@ def _video_latent_from_x0(x0: Any) -> torch.Tensor | None:
     return None
 
 
+def release_tae_decoder() -> None:
+    """Drop the cached TAE decoder so a cancelled run frees its VRAM.
+
+    The decoder is a module-level lazy singleton; after a cancel/error it would
+    otherwise stay resident until process exit. Refcount drops the model here,
+    then the caller's soft_empty_cache returns its blocks to the driver.
+    """
+    global _decoder
+    with _lock:
+        _decoder = None
+
+
 def _latent2rgb_pil(video: torch.Tensor) -> Image.Image | None:
     try:
         from comfy.latent_formats import MiniMaxH3Video

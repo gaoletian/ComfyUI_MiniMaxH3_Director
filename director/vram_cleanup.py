@@ -28,3 +28,26 @@ def cleanup_segment_vram(*, enabled: bool = True, unload_models: bool = True) ->
         log.debug("MiniMax H3 Director: segment VRAM cleanup (models unloaded, cache cleared)")
     else:
         log.debug("MiniMax H3 Director: segment VRAM cleanup (cache cleared, models kept loaded)")
+
+
+def release_director_run(*, unload_models: bool = True) -> None:
+    """Reclaim run-scoped memory after a cancelled or failed director run.
+
+    A ComfyUI cancel surfaces as ``InterruptProcessingException`` (a
+    ``BaseException``) from inside the sampler; the prompt executor catches it
+    but only runs ``cleanup_models_gc()`` — it never calls ``soft_empty_cache``
+    or ``unload_all_models``. The freed AV latents / conditioning tensors
+    therefore stay reserved in the CUDA caching allocator and the loaded UNET /
+    VAE / CLIP stay resident. This helper makes the reclaim deterministic on any
+    abnormal exit (interrupt, error, KeyboardInterrupt): gc + unload models +
+    empty device cache, and drops module-level preview caches that a cancel
+    would otherwise leave in VRAM.
+    """
+    try:
+        from .tae_preview import release_tae_decoder
+
+        release_tae_decoder()
+    except Exception as exc:
+        log.debug("TAE preview decoder release skipped: %s", exc)
+    cleanup_segment_vram(enabled=True, unload_models=unload_models)
+    log.info("MiniMax H3 Director: run cancelled/aborted — memory reclaimed")

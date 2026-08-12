@@ -185,45 +185,56 @@ class MiniMaxH3Director:
     ):
         del kwargs
 
-        plan = prepare_director_plan(
-            timeline_data=timeline_data,
-            task_type=task_type,
-            global_prompt=global_prompt,
-            total_frames=total_frames,
-            frame_rate=frame_rate,
-            width=width,
-            height=height,
-            ref_max_size=ref_max_size,
-            unique_id=unique_id,
-            i2v_groups=i2v_groups,
-            r2v_groups=r2v_groups,
-        )
+        # Deterministic RAM/VRAM reclaim on any abnormal exit: ComfyUI cancels
+        # surface as InterruptProcessingException (a BaseException, not caught
+        # by except Exception), and the executor only runs cleanup_models_gc()
+        # afterwards — leaving freed AV latents in the CUDA cache and the UNET /
+        # VAE / CLIP loaded. Re-raise so the interrupt still propagates.
+        from ..director.vram_cleanup import release_director_run
 
-        combined, segment_outputs, segment_audios, report, export_frame_counts = (
-            execute_director_plan_core(
-                plan,
-                node_id=unique_id,
-                model=model,
-                vae=video_vae,
-                audio_vae=audio_vae,
-                clip=clip,
-                cfg=cfg,
-                seed=seed,
-                steps=steps,
-                sampler=sampler,
-                scheduler=scheduler,
-                shift_video=shift_video,
-                shift_audio=shift_audio,
-                clear_vram_between_segments=clear_vram_between_segments,
+        try:
+            plan = prepare_director_plan(
+                timeline_data=timeline_data,
+                task_type=task_type,
+                global_prompt=global_prompt,
+                total_frames=total_frames,
+                frame_rate=frame_rate,
+                width=width,
+                height=height,
+                ref_max_size=ref_max_size,
+                unique_id=unique_id,
+                i2v_groups=i2v_groups,
+                r2v_groups=r2v_groups,
             )
-        )
 
-        return finalize_director_outputs(
-            plan,
-            combined,
-            segment_outputs,
-            report,
-            export_source_images=export_source_images,
-            segment_audios=segment_audios,
-            segment_frame_counts=export_frame_counts,
-        )
+            combined, segment_outputs, segment_audios, report, export_frame_counts = (
+                execute_director_plan_core(
+                    plan,
+                    node_id=unique_id,
+                    model=model,
+                    vae=video_vae,
+                    audio_vae=audio_vae,
+                    clip=clip,
+                    cfg=cfg,
+                    seed=seed,
+                    steps=steps,
+                    sampler=sampler,
+                    scheduler=scheduler,
+                    shift_video=shift_video,
+                    shift_audio=shift_audio,
+                    clear_vram_between_segments=clear_vram_between_segments,
+                )
+            )
+
+            return finalize_director_outputs(
+                plan,
+                combined,
+                segment_outputs,
+                report,
+                export_source_images=export_source_images,
+                segment_audios=segment_audios,
+                segment_frame_counts=export_frame_counts,
+            )
+        except BaseException:
+            release_director_run()
+            raise

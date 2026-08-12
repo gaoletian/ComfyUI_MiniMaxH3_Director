@@ -9674,6 +9674,18 @@ app.registerExtension({
             }
         });
 
+        // ComfyUI sends execution_interrupted (not execution_error) when a run is
+        // cancelled. Without this, the run bar stays stuck in the active state and
+        // the decoded preview-frame cache (all segments) lingers in browser memory.
+        api.addEventListener("execution_interrupted", ({ detail }) => {
+            const node = findDirectorNode(detail?.node_id);
+            const editor = node?._minimaxEditor;
+            if (!editor) return;
+            clearFrameImageCache();
+            editor._lastProgressSeg = -1;
+            editor.setRunError?.(t("run.detailError"));
+        });
+
         patchDirectorDomWidgetLayout();
         setTimeout(patchDirectorDomWidgetLayout, 500);
     },
