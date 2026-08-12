@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 
@@ -21,6 +22,14 @@ from .h3_motion_context import CONTINUITY_PIPELINE_ID
 from .plan import DirectorPlan, SegmentPlan
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.cache")
+
+# Single background writer keeps the heavy per-segment disk IO off the worker
+# thread (a 124-frame fp32 clip is ~600MB+ of torch.save per segment) while
+# serializing writes — no thread pile-up across many segments, and same-name
+# re-writes (phase-align trim) land in submission order.
+_cache_writer = ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="minimax-seg-cache"
+)
 
 
 def _cache_root(node_id: str) -> Path | None:
@@ -158,22 +167,82 @@ def save_segment_cache(
         return
     fp = segment_cache_fingerprint(seg, plan)
     idx = seg.index
+    try:
+        # Prepare payloads on the caller thread (cheap: already-CPU tensors stay
+        # views); the heavy torch.save compression runs in the background writer.
+        payload = tensor.cpu().float().contiguous()
+        text = json.dumps(fp, ensure_ascii=False, sort_keys=True)
+        latent_cpu = (
+            _av_latent_to_cpu(av_latent)
+            if av_latent is not None
+            and isinstance(av_latent, dict)
+            and "samples" in av_latent
+            else None
+        )
+        audio_cpu = _audio_payload_to_cpu(audio)
+    except Exception as exc:
+        # Xiangong / similar: RO mount or same-name write → skip cache, keep run alive.
+        log.warning(
+            "Segment %d cache prepare skipped (%s). Generation continues without disk cache.",
+            idx + 1,
+            exc,
+        )
+        return
+
+    try:
+        _cache_writer.submit(
+            _write_segment_cache_files,
+            root,
+            idx,
+            payload,
+            text,
+            latent_cpu,
+            handoff,
+            audio_cpu,
+            replace_audio,
+        )
+        log.debug(
+            "Queued cache for segment %d of node %s (%d frames%s%s)",
+            idx + 1,
+            node_id,
+            int(tensor.shape[0]),
+            ", +av_latent" if latent_cpu is not None else "",
+            ", +audio" if audio_cpu is not None else (
+                ", keep-audio" if not replace_audio else ""
+            ),
+        )
+    except Exception as exc:
+        log.warning(
+            "Segment %d cache write not queued (%s). Generation continues without disk cache.",
+            idx + 1,
+            exc,
+        )
+
+
+def _write_segment_cache_files(
+    root: Path,
+    idx: int,
+    payload: torch.Tensor,
+    meta_text: str,
+    latent_cpu: dict[str, Any] | None,
+    handoff: dict[str, Any] | None,
+    audio_cpu: dict[str, Any] | None,
+    replace_audio: bool,
+) -> None:
+    """Persist one segment's cache files. Runs on the background writer; never raises."""
     pt_path = root / f"seg_{idx:04d}.pt"
     meta_path = root / f"seg_{idx:04d}.meta.json"
     latent_path = root / f"seg_{idx:04d}.av.pt"
     handoff_path = root / f"seg_{idx:04d}.handoff.json"
     audio_path = root / f"seg_{idx:04d}.audio.pt"
     try:
-        payload = tensor.cpu().float().contiguous()
         _write_via_temp(pt_path, lambda p: torch.save(payload, p))
-        text = json.dumps(fp, ensure_ascii=False, sort_keys=True)
         _write_via_temp(
             meta_path,
-            lambda p: p.write_text(text, encoding="utf-8"),
+            lambda p: p.write_text(meta_text, encoding="utf-8"),
         )
-        if av_latent is not None and isinstance(av_latent, dict) and "samples" in av_latent:
-            cpu_latent = _av_latent_to_cpu(av_latent)
-            _write_via_temp(latent_path, lambda p: torch.save(cpu_latent, p))
+        if latent_cpu is not None:
+            _write_via_temp(latent_path, lambda p: torch.save(latent_cpu, p))
         if handoff:
             _write_via_temp(
                 handoff_path,
@@ -182,24 +251,13 @@ def save_segment_cache(
                     encoding="utf-8",
                 ),
             )
-        audio_cpu = _audio_payload_to_cpu(audio)
         if audio_cpu is not None:
             _write_via_temp(audio_path, lambda p: torch.save(audio_cpu, p))
         elif replace_audio:
             # Fresh sample with no waveform — drop stale audio from an older run.
             _safe_unlink(audio_path)
-        log.debug(
-            "Cached segment %d for node %s (%d frames%s%s)",
-            idx + 1,
-            node_id,
-            int(tensor.shape[0]),
-            ", +av_latent" if av_latent is not None else "",
-            ", +audio" if audio_cpu is not None else (
-                ", keep-audio" if not replace_audio else ""
-            ),
-        )
     except Exception as exc:
-        # Xiangong / similar: RO mount or same-name write → skip cache, keep run alive.
+        # Best-effort cache: a failed background write must never abort the run.
         log.warning(
             "Segment %d cache write skipped (%s). Generation continues without disk cache.",
             idx + 1,

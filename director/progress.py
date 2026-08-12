@@ -141,7 +141,11 @@ def report_director_segment_preview(
 
         srv = PromptServer.instance
         if srv:
-            srv.send_sync("minimax_director_preview", payload, srv.client_id)
+            # send_async: enqueue over the event loop so a slow/backlogged browser
+            # cannot block the worker thread on a multi-MB base64 payload.
+            send = getattr(srv, "send_async", None) or getattr(srv, "send_sync", None)
+            if send:
+                send("minimax_director_preview", payload, srv.client_id)
     except Exception as exc:
         log.debug("Director preview send skipped: %s", exc)
 

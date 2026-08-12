@@ -63,11 +63,14 @@ def fit_canvas(
 
 
 def fit_video_long_edge(frames: torch.Tensor, max_edge: int, stride: int = 32) -> torch.Tensor:
-    """Scale each frame so its long side is at most *max_edge*, preserving aspect ratio."""
+    """Scale each frame so its long side is at most *max_edge*, preserving aspect ratio.
+
+    All frames in a clip share one aspect ratio, so a single batched resize is
+    equivalent to the old per-frame loop but avoids 124 Python→GPU round trips.
+    """
     if frames.shape[0] == 0:
         return frames
-    chunks = [fit_long_edge(frames[i : i + 1], max_edge, stride=stride) for i in range(frames.shape[0])]
-    return torch.cat(chunks, dim=0)
+    return fit_long_edge(frames, max_edge, stride=stride)
 
 
 def pad_frames_to_canvas(

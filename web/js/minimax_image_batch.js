@@ -32,6 +32,16 @@ import { refreshPromptTokenEditors, wirePromptImageMentions } from "./minimax_pr
 import { t } from "./minimax_i18n.js";
 
 const _players = new WeakMap();
+
+// Decoded preview images, keyed by base64 frame string. `renderImageBatchGroups`
+// runs on every segment change / final preview; re-decoding 124×N JPEGs each
+// time froze the UI past ~3 segments. The cache is cleared on run start
+// (executing event) so memory stays bounded across runs.
+const _frameImageCache = new Map();
+
+export function clearFrameImageCache() {
+    _frameImageCache.clear();
+}
 /** r2v picture grid: 9 slots in 3×3; reveal 3 → 6 → 9. */
 const R2V_PICTURE_SLOTS = MAX_REFERENCE_IMAGES;
 const R2V_PICTURE_STEP = 3;
@@ -1640,12 +1650,25 @@ function frameSrc(b64) {
 }
 
 function loadFrameImages(frames) {
-    return Promise.all(frames.map((b64) => new Promise((resolve, reject) => {
-        const img = new Image();
-        img.onload = () => resolve(img);
-        img.onerror = reject;
-        img.src = frameSrc(b64);
-    })));
+    const loads = [];
+    for (const b64 of frames || []) {
+        if (!b64) continue;
+        const hit = _frameImageCache.get(b64);
+        if (hit) {
+            loads.push(Promise.resolve(hit));
+            continue;
+        }
+        loads.push(new Promise((resolve, reject) => {
+            const img = new Image();
+            img.onload = () => {
+                _frameImageCache.set(b64, img);
+                resolve(img);
+            };
+            img.onerror = reject;
+            img.src = frameSrc(b64);
+        }));
+    }
+    return Promise.all(loads);
 }
 
 function drawFrame(canvas, img) {

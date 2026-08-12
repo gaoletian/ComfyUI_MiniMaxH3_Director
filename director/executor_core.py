@@ -188,6 +188,23 @@ def _build_minimax_inputs(
     return first_frame, last_frame, ref_images, ref_videos, ref_audios, ref_video_audios
 
 
+def _sample_preview_frame_indices(total: int, *, max_frames: int = 16) -> list[int]:
+    """Head + evenly spaced keyframe indices, always ending on the last frame.
+
+    Bounds the per-segment preview payload regardless of segment length
+    (prevents the multi-MB websocket flood that froze runs past ~3 segments).
+    """
+    total = max(1, int(total))
+    max_frames = max(2, int(max_frames))
+    if total <= max_frames:
+        return list(range(total))
+    step = max(1, (total - 1) // (max_frames - 1))
+    indices = list(range(0, total, step))
+    if indices[-1] != total - 1:
+        indices.append(total - 1)
+    return indices
+
+
 def _ref_video_audios_to_dict(items) -> dict | None:
     out: dict = {}
     for item in items or []:
@@ -723,11 +740,15 @@ def execute_director_plan_core(
 
         if seg.task_key in {"t2v", "i2v", "r2v", "fl2v", "v2v", "rv2v"} and decoded.shape[0] >= 1:
             try:
-                frames_b64 = [
-                    tensor_frame_to_jpeg_b64(decoded[i])
-                    for i in range(int(decoded.shape[0]))
-                ]
+                total = int(decoded.shape[0])
                 h, w = int(decoded.shape[1]), int(decoded.shape[2])
+                # Preview flood guard: encode the head + a bounded set of evenly
+                # spaced keyframes instead of every decoded frame. Each frame is a
+                # full-res JPEG; shipping 124+ base64 strings per segment swamps the
+                # websocket (sync send blocks the worker) and the frontend re-decode
+                # (O(frames²) player rebuild) which froze the UI past ~3 segments.
+                indices = _sample_preview_frame_indices(total, max_frames=16)
+                frames_b64 = [tensor_frame_to_jpeg_b64(decoded[i]) for i in indices]
                 report_director_segment_preview(
                     node_id,
                     segment_index=ui_idx,
@@ -877,5 +898,16 @@ def execute_director_plan_core(
             for pos, idx in enumerate(run_list)
         ]
         export_frame_counts = [int(t.shape[0]) for t in segment_outputs]
-    combined = concat_continuous_chunks(export_chunks, export_segments, plan)
+    # Perf: only build the merged clip for「全部导出」. In 分段导出 the full
+    # concatenation is returned but unused by the caller — allocating it doubled
+    # peak RAM (each chunk is ~0.6GB at 864×480) and pushed runs over physical
+    # memory past ~3-4 segments. `combined` is then ignored by finalize anyway.
+    if plan.export_mode == "all" and output_chunks:
+        combined = concat_continuous_chunks(export_chunks, export_segments, plan)
+    elif export_chunks:
+        combined = export_chunks[0]
+    elif segment_outputs:
+        combined = segment_outputs[0]
+    else:
+        combined = torch.empty(0)
     return combined, segment_outputs, segment_audios, "\n".join(reports), export_frame_counts

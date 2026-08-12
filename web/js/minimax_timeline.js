@@ -44,6 +44,7 @@ import {
     addImageBatchGroup,
     bindImageBatchEvents,
     bindR2vMediaPlayback,
+    clearFrameImageCache,
     deleteImageBatchGroup,
     ensureImageBatchTimeline,
     formatMediaDuration,
@@ -1296,6 +1297,7 @@ class MiniMaxH3DirectorEditor {
         this._playCanvasWidth = 0;
         this._pauseSettling = false;
         this._runHighlightSeg = -1;
+        this._lastProgressSeg = -1;
         this._modalEl = null;
         this._modalKeyHandler = null;
         this._drawWidth = 0;
@@ -8704,6 +8706,7 @@ class MiniMaxH3DirectorEditor {
         const remain = Math.max(0, runTotal - runSeg);
 
         if (detail.phase === "finish") {
+            this._lastProgressSeg = -1;
             this.runStatusEl.className = "bd-run-status done";
             this.runTitleEl.textContent = t("run.titleDone");
             this.runDetailEl.textContent = runTotal
@@ -8766,8 +8769,18 @@ class MiniMaxH3DirectorEditor {
         // Progress text can grow the status bar — resize host so the timeline
         // canvas is not flex-squashed (fl2v repeat thumbs look stretched).
         syncDirectorNodeSize(this.node, this);
-        if (this.isImageBatch()) this.renderImageBatchGroups();
-        else this.scheduleRender();
+        // Perf: full batch re-render is expensive (rebuilds every card DOM and
+        // re-decodes completed preview frames). Only re-render when the active
+        // segment actually changes — in-segment phase updates just touch the
+        // progress bar above. Live TAE frames patch their card in-place.
+        if (this.isImageBatch()) {
+            if (timelineSeg !== this._lastProgressSeg) {
+                this._lastProgressSeg = timelineSeg;
+                this.renderImageBatchGroups();
+            }
+        } else {
+            this.scheduleRender();
+        }
     }
 
     clearRunProgress(title, detail) {
@@ -8778,6 +8791,7 @@ class MiniMaxH3DirectorEditor {
         this.runOverallEl.style.width = "0%";
         this.runPhaseEl.style.width = "0%";
         this._runHighlightSeg = -1;
+        this._lastProgressSeg = -1;
         this.updateRunSelectUI();
         if (this.isImageBatch()) this.renderImageBatchGroups();
         else this.scheduleRender();
@@ -9622,6 +9636,8 @@ app.registerExtension({
             if (!editor) return;
             editor.flushTimelineSync?.();
             editor.clearLiveSamplePreview?.();
+            editor._lastProgressSeg = -1;
+            clearFrameImageCache();
             if (editor.isImageBatch?.()) {
                 for (const seg of editor.timeline.segments || []) {
                     seg.previewB64 = "";
