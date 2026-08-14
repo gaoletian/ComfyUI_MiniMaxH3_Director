@@ -82,8 +82,8 @@ def director_perf_inputs() -> dict:
         "clear_vram_between_segments": (
             "BOOLEAN",
             {
-                "default": True,
-                "tooltip": "段间清理显存：每段结束后卸载模型并清空 CUDA 缓存。",
+                "default": False,
+                "tooltip": "段间清理显存：每段结束后卸载模型并清空 CUDA 缓存。默认关闭以保留模型驻留显存，避免每段从 SSD 重复加载 ~40GB 模型；仅显存不足时开启。",
             },
         ),
         "export_source_images": (

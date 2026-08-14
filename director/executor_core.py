@@ -215,7 +215,7 @@ def execute_director_plan_core(
     scheduler: str = "simple",
     shift_video: float = 12.0,
     shift_audio: float = 3.0,
-    clear_vram_between_segments: bool = True,
+    clear_vram_between_segments: bool = False,
 ) -> tuple[torch.Tensor, list[torch.Tensor], list[dict[str, Any]], str]:
     """Process every segment with MiniMax H3 conditioning + single-stage sampling."""
     audio_mode = resolve_audio_mode(plan)
@@ -653,7 +653,10 @@ def execute_director_plan_core(
         )
 
         if clear_vram_between_segments:
-            cleanup_segment_vram(enabled=True, unload_models=seg_total > 1)
+            # Sampling uses only the UNET. Only reclaim fragment cache here —
+            # never unload model weights, otherwise the sampler reloads the UNET
+            # from disk right before it is needed.
+            cleanup_segment_vram(enabled=True, unload_models=False)
 
         def _report_sample_phase(phase: str, value: float) -> None:
             report_director_progress(
@@ -696,7 +699,7 @@ def execute_director_plan_core(
             shift_audio=shift_audio,
             on_phase=_report_sample_phase,
             on_step_preview=_report_step_preview if live_tae_preview else None,
-            preview_every=1,
+            preview_every=5,
         )
 
         report_director_progress(

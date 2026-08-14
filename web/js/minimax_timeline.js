@@ -116,6 +116,7 @@ const RUN_CHECK_HIT_PAD_X = 8;
 const RUN_CHECK_HIT_PAD_Y = 4;
 const THUMB_MAX_W = 168;
 const THUMB_JPEG_Q = 0.55;
+const THUMB_CACHE_MAX = 512;
 const TIMELINE_SYNC_DEBOUNCE_MS = 500;
 const MAX_THUMBS_PER_SEGMENT = 20;
 const THUMB_PREFETCH_BATCH = 6;
@@ -2769,27 +2770,36 @@ class MiniMaxH3DirectorEditor {
         this._onMouseUp = () => this.onMouseUp();
         this._onCanvasHover = (e) => {
             if (this._drag || this.isPlaying) return;
-            const { x, y } = this.getMousePos(e);
-            const hit = this.hitTest(x, y);
-            this.canvas.classList.remove("bd-grab");
-            if (hit?.type === "run-check" || hit?.type === "split") {
-                this.canvas.style.cursor = "pointer";
-            } else if (hit?.type === "edge") {
-                // Edge drag is always horizontal (change start/length); keep ↔ cursor.
-                this.canvas.style.cursor = "ew-resize";
-                this.canvas.title = this.isFl2vMode()
-                    ? t("tooltip.dragFl2vDuration")
-                    : "";
-            } else if (hit?.type === "segment" && (this.isFl2vMode() || this.isR2vBatch() || this.timeline.segments.length >= 2)) {
-                this.canvas.classList.add("bd-grab");
-                this.canvas.style.cursor = "";
-                this.canvas.title = this.isFl2vMode()
-                    ? t("tooltip.dragFl2vSwap")
-                    : (this.isR2vBatch() ? t("tooltip.dragR2vOrder") : t("tooltip.dragSegmentOrder"));
-            } else {
-                this.canvas.style.cursor = "";
-                this.canvas.title = "";
-            }
+            // Throttle hit-testing to one per animation frame: hitTest() does
+            // several full passes over segments/split markers on every mousemove.
+            this._hoverEvt = e;
+            if (this._hoverRaf != null) return;
+            this._hoverRaf = requestAnimationFrame(() => {
+                this._hoverRaf = null;
+                const evt = this._hoverEvt;
+                this._hoverEvt = null;
+                if (!evt || this._drag || this.isPlaying) return;
+                const { x, y } = this.getMousePos(evt);
+                const hit = this.hitTest(x, y);
+                this.canvas.classList.remove("bd-grab");
+                if (hit?.type === "run-check" || hit?.type === "split") {
+                    this.canvas.style.cursor = "pointer";
+                } else if (hit?.type === "edge") {
+                    this.canvas.style.cursor = "ew-resize";
+                    this.canvas.title = this.isFl2vMode()
+                        ? t("tooltip.dragFl2vDuration")
+                        : "";
+                } else if (hit?.type === "segment" && (this.isFl2vMode() || this.isR2vBatch() || this.timeline.segments.length >= 2)) {
+                    this.canvas.classList.add("bd-grab");
+                    this.canvas.style.cursor = "";
+                    this.canvas.title = this.isFl2vMode()
+                        ? t("tooltip.dragFl2vSwap")
+                        : (this.isR2vBatch() ? t("tooltip.dragR2vOrder") : t("tooltip.dragSegmentOrder"));
+                } else {
+                    this.canvas.style.cursor = "";
+                    this.canvas.title = "";
+                }
+            });
         };
         window.addEventListener("mousemove", this._onMouseMove);
         window.addEventListener("mouseup", this._onMouseUp);
@@ -2864,6 +2874,9 @@ class MiniMaxH3DirectorEditor {
         this._settleRenderLateTimer = null;
         cancelAnimationFrame(this._resizeRaf);
         cancelAnimationFrame(this._playRaf);
+        cancelAnimationFrame(this._hoverRaf);
+        this._hoverRaf = null;
+        this._hoverEvt = null;
         this._resizeObserver?.disconnect();
         this._unsubLocale?.();
         this._unsubLocale = null;
@@ -5642,7 +5655,7 @@ class MiniMaxH3DirectorEditor {
         this._thumbPending.add(logicalFrame);
         this._fetchThumb(logicalFrame).then((img) => {
             this._thumbPending.delete(logicalFrame);
-            if (img) this._thumbCache.set(logicalFrame, img);
+            if (img) this._thumbCacheSet(logicalFrame, img);
             this.scheduleRender();
         });
     }
@@ -5667,7 +5680,7 @@ class MiniMaxH3DirectorEditor {
                 v.removeAttribute("src");
                 v.load();
             } catch (_) { /* ignore */ }
-            if (img) this._thumbCache.set(cacheKey, img);
+            if (img) this._thumbCacheSet(cacheKey, img);
             this.scheduleRender();
         };
         const capture = () => {
@@ -6300,6 +6313,16 @@ class MiniMaxH3DirectorEditor {
         return this._drawWidth || this._measureDrawWidth();
     }
 
+    _thumbCacheSet(key, value) {
+        if (this._thumbCache.has(key)) {
+            this._thumbCache.delete(key);
+        } else if (this._thumbCache.size >= THUMB_CACHE_MAX) {
+            const oldest = this._thumbCache.keys().next().value;
+            this._thumbCache.delete(oldest);
+        }
+        this._thumbCache.set(key, value);
+    }
+
     getMousePos(e) {
         const rect = this.canvas.getBoundingClientRect();
         const layoutW = this.getLayoutWidth();
@@ -6555,7 +6578,7 @@ class MiniMaxH3DirectorEditor {
             this.clearSplitSelection();
             this.updateSelectionUI();
             this._drag = { kind: "edge", index: hit.index, edge: hit.edge };
-            this._edgeSnapshot = JSON.parse(JSON.stringify(this.timeline.segments));
+            this._edgeSnapshot = this.timeline.segments.map((s) => ({ ...s }));
         }
         this.scheduleRender();
     }
@@ -7347,7 +7370,7 @@ class MiniMaxH3DirectorEditor {
                         const el = new Image();
                         el.crossOrigin = "anonymous";
                         el.onload = () => {
-                            this._thumbCache.set(cacheKey, el);
+                            this._thumbCacheSet(cacheKey, el);
                             this._thumbPending.delete(cacheKey);
                             this.scheduleRender();
                         };
@@ -7413,7 +7436,7 @@ class MiniMaxH3DirectorEditor {
                     const el = new Image();
                     el.crossOrigin = "anonymous";
                     el.onload = () => {
-                        this._thumbCache.set(cacheKey, el);
+                        this._thumbCacheSet(cacheKey, el);
                         this._thumbPending.delete(cacheKey);
                         this.scheduleRender();
                     };

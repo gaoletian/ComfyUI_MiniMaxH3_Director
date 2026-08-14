@@ -291,17 +291,23 @@ def load_video_resampled(
     unique = sorted({int(i) for i in frame_indices})
     decoded: dict[int, np.ndarray] = {}
     fallback: np.ndarray | None = None
+    expected: int | None = None
 
     for src_idx in unique:
         t_sec = max(0.0, src_idx / float(frame_rate or 24.0))
         native_frame = int(round(t_sec * native_fps))
-        cap.set(cv2.CAP_PROP_POS_FRAMES, native_frame)
+        # Sequential read when frames are consecutive — skip the per-frame
+        # CAP_PROP_POS_FRAMES seek, which is expensive on slow disks.
+        if expected is None or native_frame != expected:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, native_frame)
         ok, bgr = cap.read()
         if not ok or bgr is None:
             log.warning("Failed to read frame %d (t=%.3fs) from %s", native_frame, t_sec, path)
+            expected = None  # read position is now uncertain; force a re-seek
             if fallback is not None:
                 decoded[src_idx] = fallback
             continue
+        expected = native_frame + 1
 
         if rotate_90_cw:
             bgr = cv2.rotate(bgr, cv2.ROTATE_90_CLOCKWISE)

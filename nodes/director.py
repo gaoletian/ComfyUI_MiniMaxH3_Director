@@ -179,7 +179,7 @@ class MiniMaxH3Director:
         seed=0,
         shift_video=12.0,
         shift_audio=3.0,
-        clear_vram_between_segments=True,
+        clear_vram_between_segments=False,
         export_source_images=False,
         **kwargs,
     ):
